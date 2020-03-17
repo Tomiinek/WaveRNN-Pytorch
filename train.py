@@ -24,7 +24,7 @@ from torch import optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from dataset import raw_collate, discrete_collate, AudiobookDataset, TacotronDataset, MozillaTTS
+from dataset import raw_collate, discrete_collate, AudiobookDataset, TacotronDataset, MozillaTTS, TextToSpeechDataset, RandomImbalancedSampler
 from distributions import *
 from hparams import hparams as hp
 from loss_function import nll_loss
@@ -175,6 +175,7 @@ class Pruner(object):
             self.total_params += m.total_params
         return self.total_params
 
+
 def save_checkpoint(device, model, optimizer, step, checkpoint_dir, epoch):
     checkpoint_path = join(
         checkpoint_dir, "checkpoint_step{:09d}.pth".format(step))
@@ -220,17 +221,6 @@ def load_checkpoint(path, model, optimizer, reset_optimizer):
     global_test_step = checkpoint.get("global_test_step", 0)
 
     return model
-
-
-def test_save_checkpoint():
-    checkpoint_path = "checkpoints/"
-    device = torch.device("cuda" if use_cuda else "cpu")
-    model = build_model()
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
-    global global_step, global_epoch, global_test_step
-    save_checkpoint(device, model, optimizer, global_step, checkpoint_path, global_epoch)
-
-    model = load_checkpoint(checkpoint_path + "checkpoint_step000000000.pth", model, optimizer, False)
 
 
 def evaluate_model(model, data_loader, checkpoint_dir, limit_eval_to=5):
@@ -279,9 +269,7 @@ def evaluate_model(model, data_loader, checkpoint_dir, limit_eval_to=5):
 
 
 def train_loop(device, model, data_loader, optimizer, checkpoint_dir):
-    """Main training loop.
-
-    """
+    
     # create loss and put on device
     if hp.input_type == 'raw':
         if hp.distribution == 'beta':
@@ -319,7 +307,6 @@ def train_loop(device, model, data_loader, optimizer, checkpoint_dir):
                 param_group['lr'] = current_lr
             optimizer.zero_grad()
             loss.backward()
-            # clip gradient norm
             grad_norm = nn.utils.clip_grad_norm_(model.parameters(), hp.grad_norm)
             optimizer.step()
             num_pruned, z = pruner.prune(global_step)
@@ -350,40 +337,34 @@ def train_loop(device, model, data_loader, optimizer, checkpoint_dir):
                 global_test_step = False
             global_step += 1
 
-        print("epoch:{}, running loss:{}, average loss:{}, current lr:{}, num_pruned:{} ({}%)".format(global_epoch, running_loss, avg_loss,
-                                                                                 current_lr, num_pruned, z))
+        print("epoch:{}, running loss:{}, average loss:{}, current lr:{}, num_pruned:{} ({}%)".format(global_epoch, running_loss, avg_loss, current_lr, num_pruned, z))
         global_epoch += 1
 
 
-def test_prune(model):
-    layers = [model.rnn1] #, model.rnn2]
-    start_prune = 0
-    prune_steps = 100  # 20000
-    sparsity_target = 0.9375
-    pruner = Pruner(layers, start_prune, prune_steps, sparsity_target)
-
-    for i in range(100):
-        n_pruned = pruner.prune(100)
-        print(f'{i}: {n_pruned}')
-
-    return layers
-
-
-datasetreader = {"Tacotron":TacotronDataset, "TTS":MozillaTTS, "Audiobooks":AudiobookDataset}
 if __name__ == "__main__":
-    args = docopt(__doc__)
-    # print("Command line args:\n", args)
-    checkpoint_dir = args["--checkpoint-dir"]
-    checkpoint_path = args["--checkpoint"]
-    data_root = args["<data-root>"]
-    log_event_path = args["--log-event-path"]
-    dataset_type = args["--dataset"]
-    # make dirs, load dataloader and set up device
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    os.makedirs(os.path.join(checkpoint_dir, 'eval'), exist_ok=True)
-    #dataset = AudiobookDataset(data_root)
-    #dataset = TacotronDataset(data_root)
-    dataset = datasetreader[dataset_type]( data_root )
+    import argparse
+    import re
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base_directory", type=str, default=".", help="Base directory of the project.")
+    parser.add_argument("--data_root", type=str, default="dataset", help="Base of input directories.")
+    parser.add_argument("--checkpoint_directory", type=str, default="checkpoints", help="Checkpoints directory.")
+    parser.add_argument("--log_directory", type=str, default="logs", help="Logs directory.")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint name.")
+    
+    args = parser.parse_args()
+
+    checkpoint_dir = os.path.join(args.base_directory, args.checkpoint_directory)
+    if not os.path.exists(checkpoint_dir):
+        os.makedirs(checkpoint_dir)
+    if not os.path.exists(os.path.join(checkpoint_dir, "eval")):
+        os.makedirs(os.path.join(checkpoint_dir, "eval"))
+
+    log_dir = os.path.join(args.base_directory, args.log_directory)
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    
+    dataset = TextToSpeechDataset(args.data_root)
 
     if hp.input_type == 'raw':
         collate_fn = raw_collate
@@ -391,83 +372,35 @@ if __name__ == "__main__":
         collate_fn = raw_collate
     elif hp.input_type in ['bits', 'mulaw']:
         collate_fn = discrete_collate
-    else:
-        raise ValueError("input_type:{} not supported".format(hp.input_type))
-    data_loader = DataLoader(dataset, collate_fn=collate_fn, shuffle=True, num_workers=int(hp.num_workers),
-                             batch_size=hp.batch_size)
-    device = torch.device("cuda" if use_cuda else "cpu")
-    print("using device:{}".format(device))
 
-    if log_event_path is None:
-        log_event_path = "log/log_" + datetime.now().strftime("%Y%m%d-%H%M%S")
-    else:
-        log_event_path += "/" + datetime.now().strftime("%Y%m%d-%H%M%S")
-    print("Tensorboard event path: {}".format(log_event_path))
-    writer = SummaryWriter(log_dir=log_event_path)
+    sampler = RandomImbalancedSampler(dataset)
+    data_loader = DataLoader(dataset, collate_fn=collate_fn, shuffle=False, 
+                             sampler=sampler, num_workers=int(hp.num_workers), batch_size=hp.batch_size)
+    device = torch.device("cuda" if use_cuda else "cpu")
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    log_dir = os.path.join(args.base_directory, args.log_directory, f'log-{timestamp}')
+    writer = SummaryWriter(log_dir=log_dir)
 
     # build model, create optimizer
     model = build_model().to(device)
-    print("Parameter Count:")
-    print("I: %.3f million" % (num_params_count(model.I)))
-    print("Upsample: %.3f million" % (num_params_count(model.upsample)))
-    print("rnn1: %.3f million" % (num_params_count(model.rnn1)))
-    #print("rnn2: %.3f million" % (num_params_count(model.rnn2)))
-    print("fc1: %.3f million" % (num_params_count(model.fc1)))
-    #print("fc2: %.3f million" % (num_params_count(model.fc2)))
-    print("fc3: %.3f million" % (num_params_count(model.fc3)))
-    print(model)
-
     optimizer = optim.Adam(model.parameters(),
-                           lr=hp.initial_learning_rate, betas=(
-            hp.adam_beta1, hp.adam_beta2),
-                           eps=hp.adam_eps, weight_decay=hp.weight_decay,
-                           amsgrad=hp.amsgrad)
-
-    if hp.fix_learning_rate:
-        print("using fixed learning rate of :{}".format(hp.fix_learning_rate))
-    elif hp.lr_schedule_type == 'step':
-        print("using exponential learning rate decay")
-    elif hp.lr_schedule_type == 'noam':
-        print("using noam learning rate decay")
+                           lr=hp.initial_learning_rate, betas=(hp.adam_beta1, hp.adam_beta2),
+                           eps=hp.adam_eps, weight_decay=hp.weight_decay, amsgrad=hp.amsgrad)
 
     # load checkpoint
-    if checkpoint_path is None:
-        print("no checkpoint specified as --checkpoint argument, creating new model...")
-    else:
-        model = load_checkpoint(checkpoint_path, model, optimizer, True) #ei False
-        print("loading model from checkpoint:{}".format(checkpoint_path))
+    if args.checkpoint is not None:
+        model = load_checkpoint(args.checkpoint, model, optimizer, True)
         # set global_test_step to True so we don't evaluate right when we load in the model
         global_test_step = True
 
     # main train loop
     try:
-        train_loop(device, model, data_loader, optimizer, checkpoint_dir)
+        train_loop(device, model, data_loader, optimizer, args.checkpoint_directory)
     except KeyboardInterrupt:
         print("Interrupted!")
         pass
     except Exception as e:
         print(e)
     finally:
-        print("saving model....")
-        save_checkpoint(device, model, optimizer, global_step, checkpoint_dir, global_epoch)
-
-
-def test_eval():
-    data_root = "data_dir"
-    #dataset = AudiobookDataset(data_root)
-    #dataset = TacotronDataset(data_root)
-    dataset = MozillaTTS( data_root )
-    if hp.input_type == 'raw':
-        collate_fn = raw_collate
-    elif hp.input_type == 'bits':
-        collate_fn = discrete_collate
-    else:
-        raise ValueError("input_type:{} not supported".format(hp.input_type))
-    data_loader = DataLoader(dataset, collate_fn=collate_fn, shuffle=True, num_workers=0, batch_size=hp.batch_size)
-    device = torch.device("cuda" if use_cuda else "cpu")
-    print("using device:{}".format(device))
-
-    # build model, create optimizer
-    model = build_model().to(device)
-
-    evaluate_model(model, data_loader)
+        save_checkpoint(device, model, optimizer, global_step, args.checkpoint_directory, global_epoch)

@@ -3,7 +3,7 @@ import tensorflow as tf
 # Default hyperparameters:
 hparams = tf.contrib.training.HParams(
     name="WaveRNN",
-    num_workers=32,
+    num_workers=8,
     # Input type:
     # 1. raw [-1, 1]
     # 2. mixture [-1, 1]
@@ -75,7 +75,7 @@ hparams = tf.contrib.training.HParams(
     #
     # ----------------
     # training parameters
-    batch_size=128,
+    batch_size=64,
     nepochs=5000,
     save_every_step=10000,
     evaluate_every_step=10000,

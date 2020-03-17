@@ -4,11 +4,54 @@ import os
 
 import torch
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.sampler import Sampler, WeightedRandomSampler, SubsetRandomSampler
+
 from hparams import hparams as hp
 from utils import mulaw_quantize, inv_mulaw_quantize
 import pickle
 import csv
 from audio import quantize
+
+
+class RandomImbalancedSampler(Sampler):
+    
+    def __init__(self, data_source):
+        lebel_freq = {}
+        for idx in range(len(data_source)):
+            label = data_source.items[idx]['language']
+            if label in lebel_freq: lebel_freq[label] += 1
+            else: lebel_freq[label] = 1
+
+        total = float(sum(lebel_freq.values()))
+        weights = [total / lebel_freq[data_source.items[idx]['language']] for idx in range(len(data_source))]
+        self._sampler = WeightedRandomSampler(weights, len(weights))
+
+    def __iter__(self):
+        return self._sampler.__iter__()
+
+    def __len__(self):
+        return len(self._sampler)
+
+
+class TextToSpeechDataset(Dataset):
+    def __init__(self, data_path):
+        self.path = os.path.join(data_path, "")
+        with open(os.path.join(self.path, 'dataset.pkl'), 'rb') as f:
+            metadata = pickle.load(f)
+            self.items = [{'id' : x[0], 'language' : x[1]} for x in metadata]
+        self.mel_path = os.path.join(data_path, "mel")
+        self.quant_path = os.path.join(data_path, "quant")
+        self.test_path = os.path.join(data_path, "test")
+
+    def __getitem__(self, index):
+        f_id = self.items[index]['id']
+        m = np.load(os.path.join(self.mel_path, f'{f_id}.npy'))
+        x = np.load(os.path.join(self.quant_path, f'{f_id}.npy'))
+        return m, x
+
+    def __len__(self):
+        return len(self.items)
+
 
 class AudiobookDataset(Dataset):
     def __init__(self, data_path):
@@ -27,6 +70,7 @@ class AudiobookDataset(Dataset):
 
     def __len__(self):
         return len(self.metadata)
+
 
 class TacotronDataset(Dataset):
     def __init__(self, data_path):
@@ -58,6 +102,7 @@ class TacotronDataset(Dataset):
 
     def __len__(self):
         return len(self.metadata)
+
 
 class Tacotron2Dataset(Dataset):
     def __init__(self, data_path):
