@@ -42,6 +42,9 @@ def inv_spectrogram(spectrogram):
     y = processor.istft(D).astype(np.float32)
     return inv_preemphasis(y)
 
+def normalize(s):
+    return _normalize(s)
+
 def _stft(y):
     if hparams.use_lws:
         return _lws_processor(hparams).stft(y).T

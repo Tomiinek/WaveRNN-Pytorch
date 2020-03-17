@@ -1,13 +1,3 @@
-"""
-Preprocess dataset
-
-usage:
-    preprocess.py [options] <wav-dir>...
-
-options:
-     --output-dir=<dir>      Directory where processed outputs are saved. [default: data_dir].
-    -h, --help              Show help message.
-"""
 import os
 from docopt import docopt
 import numpy as np
@@ -17,12 +7,14 @@ from hparams import hparams as hp
 from utils import *
 from tqdm import tqdm
 
-def get_wav_mel(path):
-    """Given path to .wav file, get the quantized wav and mel spectrogram as numpy vectors
 
+def get_wav_mel(path, name):
     """
-    wav = load_wav(path)
-    mel = melspectrogram(wav)
+    Given path and name of a .wav file, get the quantized wav and mel spectrogram as numpy vectors.
+    """
+    wav = load_wav(os.path.join(path, "wavs", name + ".wav"))
+    mel = np.load(os.path.join(path, "gtas", name + ".npy"))
+    mel = normalize(mel)
     if hp.input_type == 'raw' or hp.input_type=='mixture':
         return wav.astype(np.float32), mel
     elif hp.input_type == 'mulaw':
@@ -32,76 +24,70 @@ def get_wav_mel(path):
         quant = quantize(wav)
         return quant.astype(np.int), mel
     else:
-        raise ValueError("hp.input_type {} not recognized".format(hp.input_type))
+        raise ValueError(f"hp.input_type {hp.input_type} not recognized")
 
 
-def process_data(wav_dirs, output_path, mel_path, wav_path):
+def process_data(data_root, data_dirs, output_path, num_test_per_dir=4):
     """
-    given wav directory and output directory, process wav files and save quantized wav and mel
-    spectrogram to output directory
+    Given language dependent directories and an output directory, 
+    process wav files and save quantized wav and mel.
     """
-    dataset_ids = []
-    # get list of wav files
-    wav_files=[]
-    for wav_dir in wav_dirs:
-        thisdir = os.listdir(wav_dir)
-        thisdir=[ os.path.join(wav_dir, thisfile) for thisfile in thisdir]
-        wav_files += thisdir
 
-    # check wav_file
-    assert len(wav_files) != 0 or wav_files[0][-4:] == '.wav', "no wav files found!"
-    # create training and testing splits
-    test_wav_files = wav_files[:4]
-    wav_files = wav_files[4:]
-    for i, wav_file in enumerate(tqdm(wav_files)):
-        # get the file id
-        file_id = '{:d}'.format(i).zfill(5)
-        wav, mel = get_wav_mel(os.path.join(wav_dir,wav_file))
-        # save
-        np.save(os.path.join(mel_path,file_id+".npy"), mel)
-        np.save(os.path.join(wav_path,file_id+".npy"), wav)
-        # add to dataset_ids
-        dataset_ids.append(file_id)
-
-    # save dataset_ids
-    with open(os.path.join(output_path,'dataset_ids.pkl'), 'wb') as f:
-        pickle.dump(dataset_ids, f)
-
-    # process testing_wavs
-    test_path = os.path.join(output_path,'test')
-    os.makedirs(test_path, exist_ok=True)
-    for i, wav_file in enumerate(test_wav_files):
-        wav, mel = get_wav_mel(os.path.join(wav_dir,wav_file))
-        # save test_wavs
-        np.save(os.path.join(test_path,"test_{}_mel.npy".format(i)),mel)
-        np.save(os.path.join(test_path,"test_{}_wav.npy".format(i)),wav)
-
+    dataset_info = []
+    file_names = []
+    test_file_names = []
     
-    print("\npreprocessing done, total processed wav files:{}.\nProcessed files are located in:{}".format(len(wav_files), os.path.abspath(output_path)))
+    c = 0
+    for d in data_dirs:
+        wav_d = os.path.join(data_root, d, "wavs")
+        all_files = [os.path.splitext(f)[0] for f in os.listdir(wav_d)]
+        
+        for i, f in enumerate(all_files):
+            c += 1
+            file_id = '{:d}'.format(c).zfill(5)
+            wav, mel = get_wav_mel(os.path.join(data_root, d), f)
+            if i < num_test_per_dir:
+                np.save(os.path.join(output_path, "test", f"test_{d}_{c}_mel.npy"), mel)
+                np.save(os.path.join(output_path, "test", f"test_{d}_{c}_wav.npy"), wav) 
+            else:
+                np.save(os.path.join(output_path, "mel",   file_id + ".npy"), mel)
+                np.save(os.path.join(output_path, "quant", file_id + ".npy"), wav) 
+                dataset_info.append((file_id, os.path.basename(d)))
 
+    # save dataset
+    with open(os.path.join(output_path, 'dataset.pkl'), 'wb') as f:
+        pickle.dump(dataset_info, f)
+    
+    print(f"Preprocessing done, total processed wav files: {len(wav_files)}")
+    print(f"Processed files are located in:{os.path.abspath(output_path)}")
 
 
 if __name__=="__main__":
-    args = docopt(__doc__)
-    wav_dir = args["<wav-dir>"]
-    output_dir = args["--output-dir"]
+    import argparse
+    import re
 
-    # create paths
-    output_path = os.path.join(output_dir,"")
-    mel_path = os.path.join(output_dir,"mel")
-    wav_path = os.path.join(output_dir,"wav")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base_directory", type=str, default=".", help="Base directory of the project.")
+    parser.add_argument("--output", type=str, default="output", help="Output directory.", required=True)
+    parser.add_argument("--data_root", type=str, default="data", help="Base of input directories.")
+    parser.add_argument("--inputs", nargs='+', type=str, help="Names of input directories.", required=True)
+    args = parser.parse_args()
 
-    # create dirs
-    os.makedirs(output_path, exist_ok=True)
-    os.makedirs(mel_path, exist_ok=True)
-    os.makedirs(wav_path, exist_ok=True)
+    output_dir = os.path.join(args.base_directory, args.output)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    output_quant_dir = os.path.join(args.base_directory, args.output, "quant")
+    if not os.path.exists(output_quant_dir):
+        os.makedirs(output_quant_dir)
+
+    output_mel_dir = os.path.join(args.base_directory, args.output, "mel")
+    if not os.path.exists(output_mel_dir):
+        os.makedirs(output_mel_dir)
+
+    output_test_dir = os.path.join(args.base_directory, args.output, "test")
+    if not os.path.exists(output_test_dir):
+        os.makedirs(output_test_dir)
 
     # process data
-    process_data(wav_dir, output_path, mel_path, wav_path)
-
-
-
-def test_get_wav_mel():
-    wav, mel = get_wav_mel('sample.wav')
-    print(wav.shape, mel.shape)
-    print(wav)
+    process_data(args.data_root, args.inputs, output_dir)
